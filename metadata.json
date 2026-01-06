@@ -1,0 +1,5 @@
+{
+  "name": "MyShell CRM Support Agent",
+  "description": "An intelligent ticket management and customer intelligence system for MyShell Gmail support. Includes automated classification, user-to-ticket matching, and persistent data storage.",
+  "requestFramePermissions": []
+}
