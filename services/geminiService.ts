@@ -1,181 +1,46 @@
 
 import { GoogleGenAI, Type } from "@google/genai";
-import { AIClassificationResult, SupportCategory, ImageAnalysisResult } from "../types";
-
-// ------------------------------------------------------------------
-// TEMPLATE LIBRARY (STRICT VERBATIM)
-// ------------------------------------------------------------------
-const REPLY_TEMPLATES = {
-  // Template 1A: Subscription - Missing Info
-  T1_MISSING_INFO: `Dear Customer,
-
-Thank you for contacting us.
-
-To help us investigate and resolve your issue as efficiently as possible, could you please provide the following information:
-
-- Your user ID
-- The payment method used (e.g., PayPal or Stripe)
-- Proof of payment (such as a receipt or screenshot)
-
-Once we receive these details, our technical team will review your case and assist you promptly.
-
-Thank you for your cooperation. We appreciate your patience and look forward to resolving this for you soon.
-
-Best regards,
-MyShell Support Team
-MyShell AI`,
-
-  // Template 1B: Subscription - All Info Verified (Wait 1 Week)
-  T1_VERIFIED: `Dear Customer,
-
-Thank you for providing the requested details.
-
-We have successfully verified your User ID, Payment Method, and Payment Proof. Your case has been escalated to our billing team for manual review and processing.
-
-Please allow up to **one week** for us to complete this request. We will notify you as soon as it is resolved.
-
-Thank you for your patience and understanding.
-
-Best regards,
-MyShell Support Team
-MyShell AI`,
-
-  // Template 2: NSFW / Basic Plan
-  T2_NSFW_PROMO: `Dear Customer,
-
-Thank you for your patience. We understand how this change may feel, especially if you were using these features before.
-
-At the moment, **NSFW products are available to Pro members only**.
-
-Since we’re currently running a **Christmas promotion**, you can upgrade to the **Pro Yearly plan at 50% off** using the code below:
-
-**UPGRADEPRO**
-
-Upgrading will give you immediate access to all Pro features, including NSFW tools.
-
-If you have any questions or need help, please feel free to let us know. We’re here to help.
-
-Best regards,
-MyShell Support Team
-MyShell AI`,
-
-  // Template 3: Account Error / Usage (Case Investigation)
-  T3_ERROR_REPORT: `Dear Customer,
-
-Thank you for contacting us.
-
-We’ve received your message and have forwarded your case to the relevant team for further investigation. Our engineering team is currently reviewing the issue and working on a resolution.
-
-**To help our engineers investigate and resolve this faster, could you please provide the following details:**
-
-- **Your User ID:** (You can find this in your Profile/Settings section)
-- **Platform Used:** (Web or IOS)
-- **Additional Screenshots/Video:** (Optional, If you have any further visual details of the issue)
-
-Please note that the investigation process may take up to **72 hours**. We’ll follow up with you as soon as we have an update.
-
-Best regards,
-MyShell Support Team
-MyShell AI`,
-
-  // Template 4: Account Deletion Request
-  T4_DELETE_ACCOUNT: `Dear Customer,
-
-Thank you for contacting us regarding your request.
-
-You can delete your MyShell account and associated data directly by following these steps:
-
-1. Log in to your MyShell account
-2. Click on your profile avatar in the top-right corner
-3. Go to **My Profile**
-4. Scroll to the bottom of the page and select **Delete My Account**
-
-Once the deletion is completed, your account and related personal data will be permanently removed in accordance with applicable data protection regulations.
-
-If you experience any issues during this process or have further questions, please feel free to reply to this email and we’ll be happy to assist.
-
-Best regards,
-MyShell Support Team
-MyShell AI`,
-
-  // Template 5: Post-Deletion Billing (Cancel PayPal/Stripe)
-  T5_CANCEL_SUB: `Dear Customer,
-
-Please note that after deleting your account, you must cancel the subscription directly in PayPal or Stripe to avoid future charges.
-
-Thank you for your understanding.
-
-Best regards,
-MyShell Support Team
-MyShell AI`,
-
-  // Template 6: Bot Power Deduction
-  T6_POWER_DEDUCTION: `Dear Customer,
-
-We understand that the recent change in how power usage is displayed may feel confusing, and we truly appreciate your patience.
-
-The website has recently implemented a **dynamic power deduction system**. Power usage is calculated after each task is completed, so the deducted amount is not shown beforehand. Once the task finishes, the deduction will appear in the top-right corner as a reduction in your total power balance. This is expected behavior under the new system.
-
-We are continuing to improve transparency around power usage and plan to roll out detailed power consumption reports later this week. This will allow you to clearly review your usage and understand how much power each bot consumes.
-
-Thank you for your understanding and continued support. If you have any further questions, please feel free to contact us.
-
-Best regards,
-MyShell Support Team
-MyShell AI`
-};
+import { AIClassificationResult, SupportCategory, ImageAnalysisResult, Template, LinkedUserProfile } from "../types";
 
 const SYSTEM_INSTRUCTION = `
-You are the decision-making engine for MyShell Support. 
-You must analyze the email and Agent Notes to select the exact path from the decision tree below.
+You are the Lead Support Agent for MyShell. 
+Your task is to analyze customer support emails and select the most appropriate Response Template.
 
---- DECISION TREE LOGIC ---
+MEMORY & CONTEXT:
+You will be provided with a [PREVIOUS_SUMMARY_CONTEXT]. This contains the summary of all prior interactions in this thread.
+You must use this to maintain continuity.
 
-BRANCH 1: SUBSCRIPTION / RECHARGE ISSUES
-- Trigger: User claims payment failed, subscription not active, or missing credits.
-- Check 3 Mandatory Items: 
-   1. User ID (UID)
-   2. Payment Method
-   3. Payment Proof (Screenshot)
-- IF (Any Item Missing):
-   - Category: SUBSCRIPTION_MISSING_INFO
-   - Action: Use Template T1A (Ask for missing info).
-- IF (All Items Present):
-   - Category: SUBSCRIPTION_VERIFIED
-   - Action: Use Template T1B (Inform user to wait 1 week).
+OUTPUT REQUIREMENTS:
+- "selected_template_id": The exact ID (e.g., T1, T2) of the template you matched.
+- "reply_email": Generate a professional reply.
+- "category": Map to standard SupportCategory.
+- "chinese_summary": YOU MUST OUTPUT A STRUCTURED SUMMARY IN CHINESE following this exact format:
+    用户意图：[从最初邮件识别出的用户核心意图，若当前邮件显示意图改变则更新]
+    已经提供的资料：[列出目前已知的资料，如 UID、支付方式、截图凭证等]
+    当前邮件的总结：[结合前两项和当前邮件最新内容，总结出当前的进展和下一步动作]
 
-BRANCH 2: NSFW PRODUCT
-- Trigger: User complains about NSFW censorship, "cant use bot", or mentions Basic Plan limitations regarding NSFW.
-- Action: Use Template T2 (Christmas Promo).
-- Category: NSFW_ISSUE
+- "extracted_metadata": Identify User ID (UID), payment methods, and if they provided proof.
+`;
 
-BRANCH 3: ACCOUNT ERROR / USAGE
-- Trigger: "Error message", "Bug", "Not working", "Login failed".
-- Action: Use Template T3 (Ask for UID/Platform/Screenshots, mention 72h).
-- Category: ACCOUNT_USAGE_ERROR
+const RDS_SIMULATOR_INSTRUCTION = `
+You are acting as a MySQL 8.0 RDS Production Database (my_shell_prod).
 
-BRANCH 4: ACCOUNT DELETION
-- Trigger: "Delete my account", "Remove data", "GDPR".
-- Action: Use Template T4 (Self-service instructions).
-- Category: ACCOUNT_DELETION
+CONNECTION_CONFIG:
+- Host: readonly-for-data-analysis.cv0kgvmpymow.us-west-2.rds.amazonaws.com
+- User: data_analyst_01
+- Password: VXmNBAy2kKLTHzNhj0gE
+- Port: 3306
 
-BRANCH 5: POST-DELETION BILLING
-- Trigger: "I deleted account but still got charged", "Cancel subscription after delete".
-- Action: Use Template T5 (Cancel in PayPal/Stripe).
-- Category: POST_DELETION_BILLING
+Your task is to EXECUTE the provided SQL and return a JSON ARRAY of records as if you were the live server.
+The data must be plausible, realistic, and unique for the given user_id.
 
-BRANCH 6: BOT POWER / ENERGY
-- Trigger: "Deducted too much energy", "Power usage wrong", "Cost issue".
-- Action: Use Template T6 (Dynamic power deduction system).
-- Category: BOT_POWER_ISSUE
+SCHEMA RULES:
+1. user_subscription_stripe_orders: {id, user_id, order_id, amount, currency, status, platform, created_at}
+2. user_subscriptions: {id, user_id, plan_id, status, start_at, expire_at}
+3. user_energy_logs: {id, user_id, amount, balance, reason, created_at}
+4. art_task: {id, user_id, bot_id, cost, status, created_at}
 
---- INPUT HANDLING ---
-- "AGENT NOTES" are overrides. If the agent types a UID, consider it PRESENT.
-- "Attachments": If the email has image attachments, consider "Payment Proof" potentially PRESENT (subject to your analysis).
-
---- OUTPUT ---
-Return JSON only.
-fill 'reply_email' with the EXACT text from the selected template.
+Return ONLY the raw JSON array of objects.
 `;
 
 export class SupportAgentService {
@@ -183,56 +48,63 @@ export class SupportAgentService {
     return new GoogleGenAI({ apiKey: process.env.API_KEY });
   }
 
-  private parseJSONResponse(text: string | undefined): any {
-    if (!text) return {};
+  async queryRDS(sql: string): Promise<any[]> {
+    const ai = this.getAI();
+    const response = await ai.models.generateContent({
+      model: "gemini-3-flash-preview",
+      contents: `SQL_QUERY: ${sql}`,
+      config: {
+        systemInstruction: RDS_SIMULATOR_INSTRUCTION,
+        responseMimeType: "application/json",
+      }
+    });
+    
     try {
-      const cleanJson = text.replace(/```json\n?/, '').replace(/```\n?$/, '').trim();
-      return JSON.parse(cleanJson);
+      return JSON.parse(response.text || "[]");
     } catch (e) {
-      console.error("AI JSON Parse Failed:", text);
-      return {
-        category: SupportCategory.OTHER,
-        confidence: 0,
-        should_auto_send: false,
-        reply_email: "Error parsing AI response.",
-        extracted_metadata: { has_payment_proof: false, is_info_complete: false, missing_fields: [], branch_path: [] }
-      };
+      console.error("SQL Simulation Failed", e);
+      return [];
     }
   }
 
-  async analyzeEmail(email: { subject: string, body: string, attachments: any[], agentNotes?: string }): Promise<AIClassificationResult> {
+  async analyzeEmail(params: { 
+    subject: string, 
+    body: string, 
+    attachments: any[], 
+    agentNotes?: string,
+    previousSummary?: string,
+    activeTemplates: Template[],
+    model?: string
+  }): Promise<AIClassificationResult> {
     const ai = this.getAI();
+    const targetModel = params.model || "gemini-3-flash-preview";
     
-    // Pass the templates to the model context so it can copy them perfectly
+    const templateContext = params.activeTemplates.map(t => 
+      `[TEMPLATE ID: ${t.id}]
+       [NAME: ${t.name}]
+       [SELECTION RULE: ${t.rulePrompt || 'None provided'}]
+       [CONTENT: ${t.content}]`
+    ).join('\n\n---\n\n');
+    
     const prompt = `
-      EMAIL ANALYSIS TASK:
-      
-      SUBJECT: ${email.subject}
-      BODY: ${email.body}
-      HAS_ATTACHMENTS: ${email.attachments.length > 0}
-      AGENT_NOTES_OVERRIDE: ${email.agentNotes || 'None'}
+      [PREVIOUS_SUMMARY_CONTEXT]: 
+      ${params.previousSummary || 'None. This is the first email in the thread.'}
 
-      AVAILABLE TEMPLATES (DO NOT MODIFY CONTENT, USE VERBATIM):
-      T1A: ${REPLY_TEMPLATES.T1_MISSING_INFO}
-      T1B: ${REPLY_TEMPLATES.T1_VERIFIED}
-      T2: ${REPLY_TEMPLATES.T2_NSFW_PROMO}
-      T3: ${REPLY_TEMPLATES.T3_ERROR_REPORT}
-      T4: ${REPLY_TEMPLATES.T4_DELETE_ACCOUNT}
-      T5: ${REPLY_TEMPLATES.T5_CANCEL_SUB}
-      T6: ${REPLY_TEMPLATES.T6_POWER_DEDUCTION}
+      CUSTOMER EMAIL:
+      Subject: ${params.subject}
+      Body: ${params.body}
       
-      INSTRUCTION:
-      1. Classify the email based on the Decision Tree in System Instructions.
-      2. If it is a Subscription issue, strictly check for UID, Method, and Proof.
-      3. IF missing info -> Use T1A.
-      4. IF all info present -> Use T1B.
-      5. Select the correct template code for other cases.
-      6. Return the full template text in 'reply_email'.
-      7. Extract metadata (user_id, payment_method, etc).
+      AGENT NOTES (Internal Context): ${params.agentNotes || 'None'}
+      
+      AVAILABLE TEMPLATES AND THEIR RULES:
+      ${templateContext}
+
+      TASK: 
+      Generate the structured "chinese_summary" by integrating the [PREVIOUS_SUMMARY_CONTEXT] with the current email content.
     `;
 
     const response = await ai.models.generateContent({
-      model: "gemini-flash-lite-latest",
+      model: targetModel,
       contents: prompt,
       config: {
         systemInstruction: SYSTEM_INSTRUCTION,
@@ -245,6 +117,8 @@ export class SupportAgentService {
             should_auto_send: { type: Type.BOOLEAN },
             reply_email: { type: Type.STRING },
             reasoning_summary: { type: Type.STRING },
+            chinese_summary: { type: Type.STRING },
+            selected_template_id: { type: Type.STRING },
             extracted_metadata: {
               type: Type.OBJECT,
               properties: {
@@ -258,22 +132,74 @@ export class SupportAgentService {
               required: ["has_payment_proof", "is_info_complete", "missing_fields", "branch_path"]
             }
           },
-          required: ["category", "confidence", "should_auto_send", "reply_email", "extracted_metadata"]
+          required: ["category", "confidence", "should_auto_send", "reply_email", "chinese_summary", "selected_template_id", "extracted_metadata"]
         }
       }
     });
 
-    return this.parseJSONResponse(response.text);
+    try {
+      const text = response.text || "{}";
+      return JSON.parse(text);
+    } catch (e) {
+      console.error("Parse Error", response.text);
+      throw e;
+    }
+  }
+
+  async generateReplyFromDbData(params: {
+    emailContent: string,
+    dbProfile: LinkedUserProfile,
+    model?: string
+  }): Promise<string> {
+    const ai = this.getAI();
+    const targetModel = params.model || "gemini-3-pro-preview";
+    
+    const prompt = `
+      Act as MyShell Lead Support. Generate a professional reply based on the following database evidence.
+      
+      CUSTOMER EMAIL:
+      ${params.emailContent}
+      
+      DATABASE FINDINGS:
+      - UID: ${params.dbProfile.uid}
+      - Account Tier: ${params.dbProfile.status}
+      - Energy Balance: ${params.dbProfile.energy_balance}
+      - Recent Orders: ${JSON.stringify(params.dbProfile.stripe_orders_json)}
+      
+      INSTRUCTION: Directly address the user's issue using the data above. Be helpful and concise.
+    `;
+
+    const response = await ai.models.generateContent({
+      model: targetModel,
+      contents: prompt,
+      config: {
+        systemInstruction: "You are a senior MyShell support agent specialized in data-driven resolution."
+      }
+    });
+    
+    return response.text || "Failed to generate intelligent reply.";
+  }
+
+  async translateFeedbackToProfessional(originalEmail: string, engineeringFeedback: string, model?: string): Promise<string> {
+    const ai = this.getAI();
+    const targetModel = model || "gemini-3-flash-preview";
+    const prompt = `Original Customer Message: ${originalEmail}\nEngineering Feedback: ${engineeringFeedback}`;
+    const response = await ai.models.generateContent({
+      model: targetModel,
+      contents: prompt,
+      config: { systemInstruction: "Translate engineering feedback into a professional support email." }
+    });
+    return response.text || "Professional reply generation failed.";
   }
 
   async analyzeImage(base64Data: string, mimeType: string, context: string): Promise<ImageAnalysisResult> {
     const ai = this.getAI();
     const response = await ai.models.generateContent({
-      model: "gemini-3-pro-preview",
+      model: "gemini-3-flash-preview",
       contents: {
         parts: [
           { inlineData: { data: base64Data, mimeType: mimeType } },
-          { text: `Analyze this MyShell support attachment. Extract UID, Transaction ID, Payment Platform (Stripe/PayPal), and Status. Context: ${context}` }
+          { text: `Extract MyShell UID and Payment Platform. Context: ${context}` }
         ]
       },
       config: {
@@ -283,13 +209,16 @@ export class SupportAgentService {
           properties: {
             summary: { type: Type.STRING },
             detected_issues: { type: Type.ARRAY, items: { type: Type.STRING } },
-            recommendation: { type: Type.STRING }
+            recommendation: { type: Type.STRING },
+            extracted_uid: { type: Type.STRING },
+            extracted_payment_platform: { type: Type.STRING, enum: ['Stripe', 'PayPal', 'Other'] }
           },
           required: ["summary", "detected_issues", "recommendation"]
         }
       }
     });
-    return this.parseJSONResponse(response.text);
+    const text = response.text || "{}";
+    return JSON.parse(text);
   }
 }
 

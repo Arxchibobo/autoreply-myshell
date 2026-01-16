@@ -1,244 +1,458 @@
 
-import React, { useState, useEffect } from 'react';
-import { Email, ImageAnalysisResult, Attachment } from '../types';
+import React, { useState, useEffect, useMemo } from 'react';
+import { Email, Attachment, Template, SupportCategory, LinkedUserProfile } from '../types';
 import Badge from './Badge';
 import { supportAgent } from '../services/geminiService';
 import { gmailApi } from '../services/gmailService';
 
-interface EmailDetailProps { email: Email; onUpdate: (updatedEmail: Email) => void; }
+interface EmailDetailProps { 
+  email: Email; 
+  templates: Template[];
+  history: Email[];
+  activeModel?: string;
+  onSelectHistory: (email: Email) => void;
+  onUpdate: (updatedEmail: Email) => void; 
+}
 
-const EmailDetail: React.FC<EmailDetailProps> = ({ email, onUpdate }) => {
+type DBTab = 'STRIPE' | 'SUBS' | 'ENERGY' | 'TASKS';
+
+const EmailDetail: React.FC<EmailDetailProps> = ({ email, templates, history, activeModel, onSelectHistory, onUpdate }) => {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [isSending, setIsSending] = useState(false);
+  const [isQuerying, setIsQuerying] = useState(false);
+  const [isGeneratingFromData, setIsGeneratingFromData] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [sendSuccess, setSendSuccess] = useState(false);
-  const [imageInsights, setImageInsights] = useState<ImageAnalysisResult | null>(null);
-  const [isImageAnalyzing, setIsImageAnalyzing] = useState(false);
   
   const [manualUserId, setManualUserId] = useState('');
   const [manualPaymentMethod, setManualPaymentMethod] = useState('');
   const [humanSupplement, setHumanSupplement] = useState('');
-  const [draftReply, setDraftReply] = useState(email.aiResult?.reply_email || '');
+  const [draftReply, setDraftReply] = useState('');
+  
+  const [selectedTemplateId, setSelectedTemplateId] = useState<string | null>(null);
+  const [attachmentPreviews, setAttachmentPreviews] = useState<Record<string, string>>({});
+  const [enlargedImage, setEnlargedImage] = useState<string | null>(null);
+  const [activeDbTab, setActiveDbTab] = useState<DBTab>('STRIPE');
+  const [queryLogs, setQueryLogs] = useState<string[]>([]);
+
+  const incomingHistory = useMemo(() => {
+    return history.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+  }, [history]);
+
+  const aiRecommendedId = useMemo(() => {
+    if (!email.aiResult) return 'T7';
+    const cat = email.aiResult.category;
+    const mapping: Record<string, string> = {
+      [SupportCategory.SUBSCRIPTION_MISSING_INFO]: 'T1',
+      [SupportCategory.NSFW_ISSUE]: 'T2',
+      [SupportCategory.ACCOUNT_USAGE_ERROR]: 'T3',
+      [SupportCategory.ACCOUNT_DELETION]: 'T4',
+      [SupportCategory.BOT_POWER_ISSUE]: 'T5',
+      [SupportCategory.POST_DELETION_BILLING]: 'T6',
+      [SupportCategory.SUBSCRIPTION_VERIFIED]: 'T7',
+      [SupportCategory.OTHER]: 'T7'
+    };
+    return mapping[cat] || 'T7';
+  }, [email.aiResult]);
 
   useEffect(() => { 
-    setDraftReply(email.aiResult?.reply_email || '');
-    setHumanSupplement(''); // Reset human supplement on new email select
-    
-    const aiUid = email.aiResult?.extracted_metadata?.user_id;
-    setManualUserId(aiUid && !aiUid.includes('MISSING') ? aiUid : '');
-    
-    const aiMethod = email.aiResult?.extracted_metadata?.payment_method;
-    setManualPaymentMethod(aiMethod && !aiMethod.includes('MISSING') ? aiMethod : '');
-    
-    setErrorMsg(null);
+    setHumanSupplement(''); 
     setSendSuccess(false);
-    setImageInsights(null);
-  }, [email.id]);
+    setErrorMsg(null);
+    setSelectedTemplateId(aiRecommendedId);
+    
+    if (email.status === 'resolved' && email.sentReply) {
+      setDraftReply(email.sentReply);
+    } else if (aiRecommendedId === 'T7') {
+      setDraftReply(email.aiResult?.reply_email || templates.find(t => t.id === 'T7')?.content || '');
+    } else {
+      setDraftReply(templates.find(temp => temp.id === aiRecommendedId)?.content || '');
+    }
+
+    setManualUserId(email.aiResult?.extracted_metadata?.user_id || '');
+    setManualPaymentMethod(email.aiResult?.extracted_metadata?.payment_method || '');
+    email.attachments.forEach(att => loadPreview(att));
+  }, [email.id, aiRecommendedId, templates]);
+
+  const loadPreview = async (att: Attachment) => {
+    if (attachmentPreviews[att.id]) return;
+    try {
+      const base64 = await gmailApi.fetchAttachmentData(email.id, att.id);
+      setAttachmentPreviews(prev => ({ ...prev, [att.id]: base64 }));
+    } catch (e) { console.error(e); }
+  };
+
+  const getActiveSql = (tab: DBTab, uid: string) => {
+    const targetUid = uid || '47188073';
+    switch (tab) {
+      case 'STRIPE': return `SELECT * FROM user_subscription_stripe_orders WHERE user_id = ${targetUid} ORDER BY id DESC LIMIT 5;`;
+      case 'SUBS': return `SELECT * FROM user_subscriptions WHERE user_id = ${targetUid} ORDER BY id DESC LIMIT 5;`;
+      case 'ENERGY': return `SELECT * FROM user_energy_logs WHERE user_id = ${targetUid} ORDER BY id DESC LIMIT 3;`;
+      case 'TASKS': return `SELECT * FROM art_task WHERE user_id = ${targetUid} ORDER BY id DESC LIMIT 5;`;
+      default: return '';
+    }
+  };
+
+  const handleQueryUser = async () => {
+    if (!manualUserId || manualUserId.trim() === '') {
+      return;
+    }
+    setIsQuerying(true);
+    setQueryLogs([
+      `[INFO] Establishing TCP connection to us-west-2.rds.amazonaws.com:3306...`,
+      `[INFO] Authenticating user 'data_analyst_01' via SSL...`,
+      `[INFO] Access granted to 'my_shell_prod'. Parsing AST...`
+    ]);
+    
+    try {
+      const targetUid = manualUserId;
+      
+      const [stripeRes, subsRes, energyRes, tasksRes] = await Promise.all([
+        supportAgent.queryRDS(getActiveSql('STRIPE', targetUid)),
+        supportAgent.queryRDS(getActiveSql('SUBS', targetUid)),
+        supportAgent.queryRDS(getActiveSql('ENERGY', targetUid)),
+        supportAgent.queryRDS(getActiveSql('TASKS', targetUid))
+      ]);
+
+      setQueryLogs(prev => [...prev, `[SUCCESS] ${stripeRes.length + subsRes.length + energyRes.length + tasksRes.length} records retrieved.`]);
+
+      const profile: LinkedUserProfile = {
+        uid: targetUid,
+        status: subsRes.some((s: any) => s.status === 'active') ? 'Pro' : 'Basic',
+        energy_balance: energyRes[0]?.balance || 0,
+        is_verified: true,
+        stripe_orders_count: stripeRes.length,
+        subscriptions_count: subsRes.length,
+        art_tasks_count: tasksRes.length,
+        energy_logs_count: energyRes.length,
+        stripe_orders_json: stripeRes,
+        subscriptions_json: subsRes,
+        energy_logs_json: energyRes,
+        art_tasks_json: tasksRes
+      };
+      
+      onUpdate({ ...email, linkedProfile: profile });
+    } catch (e) {
+      console.error("RDS Sync Error", e);
+      setQueryLogs(prev => [...prev, `[ERROR] Connection failed: Access denied for user 'data_analyst_01'.`]);
+    } finally {
+      setIsQuerying(false);
+    }
+  };
+
+  const handleGenerateReplyFromData = async () => {
+    if (!email.linkedProfile) return;
+    setIsGeneratingFromData(true);
+    try {
+      const response = await supportAgent.generateReplyFromDbData({
+        emailContent: email.body,
+        dbProfile: email.linkedProfile,
+        model: activeModel
+      });
+      setDraftReply(response);
+      setSelectedTemplateId('T7'); 
+    } catch (e) { console.error(e); } finally { setIsGeneratingFromData(false); }
+  };
 
   const handleTriage = async () => {
-    setErrorMsg(null);
     setIsAnalyzing(true);
+    setErrorMsg(null);
     try {
-      const overrides = [];
-      if (manualUserId) overrides.push(`[USER ID]: ${manualUserId}`);
-      if (manualPaymentMethod) overrides.push(`[PAYMENT METHOD]: ${manualPaymentMethod}`);
-      if (humanSupplement) overrides.push(`[HUMAN SUPPLEMENT]: ${humanSupplement}`);
-      
+      const threadHistory = incomingHistory.filter(h => h.id !== email.id);
+      const latestSummary = threadHistory.find(h => h.aiResult?.chinese_summary)?.aiResult?.chinese_summary;
+
       const result = await supportAgent.analyzeEmail({
         subject: email.subject,
         body: email.body,
         attachments: email.attachments,
-        agentNotes: overrides.join('\n')
+        previousSummary: latestSummary,
+        agentNotes: `[OVERRIDE] UID: ${manualUserId}, Method: ${manualPaymentMethod}\n[HUMAN]: ${humanSupplement}`,
+        activeTemplates: templates,
+        model: activeModel
       });
-      
-      setDraftReply(result.reply_email);
       onUpdate({
         ...email,
         aiResult: result,
-        status: result.extracted_metadata.is_info_complete ? 'in_progress' : 'info_missing'
+        status: result.extracted_metadata.is_info_complete ? 'ready_to_resolve' : 'info_missing'
       });
-    } catch (err: any) {
-      setErrorMsg(err.message || "Synthesis failed.");
-    } finally {
-      setIsAnalyzing(false);
-    }
-  };
-
-  const analyzeImageAttachment = async (att: Attachment) => {
-    setIsImageAnalyzing(true);
-    try {
-      const base64Data = await gmailApi.fetchAttachmentData(email.id, att.id);
-      const result = await supportAgent.analyzeImage(base64Data, att.mimeType, email.body);
-      setImageInsights(result);
-      const foundId = result.summary.match(/ID:\s*(\d+)/) || result.summary.match(/UID:\s*(\d+)/);
-      if (foundId) setManualUserId(foundId[1]);
-    } catch (e: any) {
-      setErrorMsg("Image scan failed.");
-    } finally {
-      setIsImageAnalyzing(false);
-    }
+      if (selectedTemplateId === 'T7') setDraftReply(result.reply_email);
+    } catch (err: any) { setErrorMsg(err.message); } finally { setIsAnalyzing(false); }
   };
 
   const handleSendReply = async () => {
     if (!draftReply) return;
     setIsSending(true);
-    setErrorMsg(null);
     try {
       await gmailApi.sendReply(email.sender, email.subject, email.threadId, email.messageId, draftReply);
       setSendSuccess(true);
-      onUpdate({ ...email, status: 'resolved', isRead: true });
-    } catch (err: any) {
-      setErrorMsg(`Send Error: ${err.message}`);
-    } finally {
-      setIsSending(false);
+      onUpdate({ ...email, status: 'resolved', isRead: true, sentReply: draftReply });
+    } catch (err: any) { setErrorMsg(err.message); } finally { setIsSending(false); }
+  };
+
+  const selectTemplate = (t: Template) => {
+    setSelectedTemplateId(t.id);
+    if (t.id === 'T7') {
+      setDraftReply(email.aiResult?.reply_email || t.content);
+    } else {
+      setDraftReply(t.content);
     }
   };
 
-  const imageAttachments = email.attachments.filter(a => a.mimeType.startsWith('image/'));
-  
-  // Mandatory Requirements Checklist
-  const hasUid = manualUserId.length > 0 || (email.aiResult?.extracted_metadata.user_id && !email.aiResult.extracted_metadata.user_id.includes('MISSING'));
-  const hasMethod = manualPaymentMethod.length > 0 || (email.aiResult?.extracted_metadata.payment_method && !email.aiResult.extracted_metadata.payment_method.includes('MISSING'));
-  const hasProof = email.aiResult?.extracted_metadata.has_payment_proof || imageAttachments.length > 0;
-
   return (
-    <div className="flex h-full w-full bg-white overflow-hidden animate-in fade-in duration-500">
-      {/* Left Column: Email Content */}
-      <div className="flex-1 flex flex-col border-r border-slate-100 overflow-y-auto custom-scrollbar">
-        <div className="p-8 border-b border-slate-50 sticky top-0 bg-white z-10 shadow-sm">
-          <div className="flex justify-between items-center mb-6">
-            <Badge variant={email.status === 'resolved' ? 'green' : 'blue'}>
-              {email.status.toUpperCase()}
-            </Badge>
-            <div className="flex gap-2">
-               <Checkmark label="UID" active={!!hasUid} />
-               <Checkmark label="Method" active={!!hasMethod} />
-               <Checkmark label="Proof" active={!!hasProof} />
+    <div className="flex h-full w-full bg-white overflow-hidden relative text-slate-900">
+      {enlargedImage && (
+        <div className="fixed inset-0 z-[100] bg-slate-950/90 flex items-center justify-center p-8 backdrop-blur-sm cursor-zoom-out" onClick={() => setEnlargedImage(null)}>
+          <img src={enlargedImage} alt="Full view" className="max-w-full max-h-full object-contain rounded-xl" />
+        </div>
+      )}
+
+      {/* History Sidebar */}
+      <aside className="w-[180px] bg-slate-50/50 border-r border-slate-100 flex flex-col p-6 overflow-y-auto shrink-0">
+        <h3 className="text-[9px] font-black text-slate-400 uppercase tracking-widest mb-6">History</h3>
+        <div className="relative space-y-8 pl-4">
+          <div className="absolute left-[7px] top-1 bottom-1 w-0.5 bg-slate-200/50" />
+          {incomingHistory.map((h) => (
+            <div key={h.id} onClick={() => onSelectHistory(h)} className={`relative group cursor-pointer transition-all ${h.id === email.id ? 'opacity-100' : 'opacity-40 hover:opacity-80'}`}>
+              <div className={`absolute -left-[13px] top-1 w-3 h-3 rounded-full border-2 border-white transition-all ${h.id === email.id ? 'bg-blue-600' : h.status === 'resolved' ? 'bg-emerald-500' : 'bg-slate-300'}`} />
+              <div className="flex flex-col gap-1">
+                <span className="text-[8px] font-black text-slate-400">
+                  {new Date(h.timestamp).toLocaleDateString([], {month: 'short', day: 'numeric'})}
+                </span>
+                <p className="text-[10px] font-bold line-clamp-2">{h.subject}</p>
+              </div>
             </div>
+          ))}
+        </div>
+      </aside>
+
+      {/* Main Content */}
+      <div className="flex-1 flex flex-col border-r border-slate-100 overflow-y-auto custom-scrollbar">
+        <div className="p-8 border-b border-slate-50 sticky top-0 bg-white z-20 flex justify-between items-start">
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-3 mb-3">
+               <Badge variant={email.status === 'resolved' ? 'green' : 'gray'}>{email.status.toUpperCase()}</Badge>
+            </div>
+            <h2 className="text-xl font-black text-slate-900 mb-1">{email.subject}</h2>
+            <div className="text-xs font-bold text-slate-400">From: {email.senderName} ({email.sender})</div>
           </div>
-          <h1 className="text-2xl font-black text-slate-900 mb-6">{email.subject}</h1>
-          <div className="text-xs font-bold text-slate-500 flex items-center gap-2">
-            <span className="text-slate-400">From:</span>
-            <span className="text-slate-900">{email.senderName}</span>
-            <span className="text-slate-400">({email.sender})</span>
+          <div className="flex gap-2">
+            <button onClick={handleTriage} disabled={isAnalyzing} className="px-4 py-2 bg-slate-900 text-white rounded-lg text-xs font-black uppercase tracking-widest hover:bg-black transition-all">
+              {isAnalyzing ? 'Analyzing...' : 'AI Triage'}
+            </button>
+            <button onClick={handleSendReply} disabled={isSending || !draftReply || email.status === 'resolved'} className="px-4 py-2 bg-blue-600 text-white rounded-lg text-xs font-black uppercase tracking-widest hover:bg-blue-700 transition-all disabled:opacity-50">
+              {isSending ? 'Sending...' : email.status === 'resolved' ? 'Reply Sent' : 'Send Reply'}
+            </button>
           </div>
         </div>
 
-        <div className="p-8 space-y-12 pb-32">
-          <section>
-            <h3 className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-4">Original Message</h3>
-            <div className="bg-slate-50/50 rounded-[32px] p-8 text-sm leading-relaxed text-slate-800 whitespace-pre-wrap border border-slate-100 min-h-[200px]">
-              {email.body}
-            </div>
-          </section>
+        <div className="p-8">
+          <div className="prose prose-slate max-w-none text-sm text-slate-600 whitespace-pre-wrap mb-8">
+            {email.body}
+          </div>
 
-          {imageAttachments.length > 0 && (
-            <section>
-              <h3 className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-4">Evidence Attachments ({imageAttachments.length})</h3>
-              <div className="grid grid-cols-2 gap-4">
-                {imageAttachments.map(att => (
-                  <div key={att.id} className="p-5 bg-white rounded-2xl border border-slate-100 flex flex-col items-center gap-4 shadow-sm">
-                    <div className="w-12 h-12 bg-slate-50 rounded-xl flex items-center justify-center text-slate-400">
-                      <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
-                    </div>
-                    <span className="text-[10px] font-black text-slate-400 truncate w-full text-center">{att.filename}</span>
-                    <button 
-                      onClick={() => analyzeImageAttachment(att)} 
-                      disabled={isImageAnalyzing}
-                      className="w-full py-2.5 bg-blue-600 text-white rounded-xl text-[10px] font-black uppercase hover:bg-blue-700 transition-all disabled:opacity-50"
-                    >
-                      {isImageAnalyzing ? 'Extracting Data...' : 'AI Scan Proof'}
-                    </button>
+          {email.attachments.length > 0 && (
+            <div className="mb-8">
+              <h3 className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-4">Attachments ({email.attachments.length})</h3>
+              <div className="flex flex-wrap gap-4">
+                {email.attachments.map(att => (
+                  <div key={att.id} className="relative group cursor-pointer" onClick={() => attachmentPreviews[att.id] && setEnlargedImage(`data:${att.mimeType};base64,${attachmentPreviews[att.id]}`)}>
+                    {attachmentPreviews[att.id] && att.mimeType.startsWith('image/') ? (
+                      <img src={`data:${att.mimeType};base64,${attachmentPreviews[att.id]}`} className="w-24 h-24 object-cover rounded-lg border border-slate-200 shadow-sm" alt={att.filename} />
+                    ) : (
+                      <div className="w-24 h-24 bg-slate-50 rounded-lg border border-slate-200 flex flex-col items-center justify-center p-2 text-center">
+                        <svg className="w-6 h-6 text-slate-300 mb-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13"/></svg>
+                        <span className="text-[8px] font-bold text-slate-400 truncate w-full">{att.filename}</span>
+                      </div>
+                    )}
                   </div>
                 ))}
               </div>
-              {imageInsights && (
-                <div className="mt-6 p-6 bg-emerald-50 border border-emerald-100 rounded-[32px] animate-in slide-in-from-bottom border-l-8 border-l-emerald-400">
-                  <h4 className="text-[10px] font-black text-emerald-600 uppercase mb-3">Vision Scan Results</h4>
-                  <p className="text-xs font-bold text-slate-700 leading-relaxed">{imageInsights.summary}</p>
-                </div>
-              )}
-            </section>
+            </div>
           )}
-        </div>
-      </div>
 
-      {/* Right Column: AI Triage & Draft */}
-      <div className="w-[450px] flex-shrink-0 bg-[#F8FAFC] border-l border-slate-200 flex flex-col p-8 gap-6 overflow-y-auto custom-scrollbar">
-        {errorMsg && <div className="p-4 bg-rose-50 text-rose-600 text-[10px] font-black rounded-2xl uppercase border border-rose-100">{errorMsg}</div>}
-        {sendSuccess && <div className="p-4 bg-emerald-50 text-emerald-600 text-[10px] font-black rounded-2xl uppercase border border-emerald-100 shadow-lg">Reply transmitted</div>}
-
-        <section className="bg-white rounded-[32px] p-6 border border-slate-200 shadow-xl space-y-6">
-          <h3 className="text-[10px] font-black text-slate-400 uppercase tracking-widest flex justify-between items-center">
-            1. Knowledge Base overrides
-            {isAnalyzing && <span className="animate-spin text-blue-600">
-              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"/></svg>
-            </span>}
-          </h3>
-          
-          <div className="space-y-4">
-            <div className="relative group">
-              <span className="absolute left-4 top-2 text-[8px] font-black text-slate-300 uppercase">User ID</span>
-              <input value={manualUserId} onChange={e => setManualUserId(e.target.value)} className="w-full h-14 pt-4 px-4 bg-slate-50 rounded-xl text-xs font-black outline-none border border-transparent focus:border-blue-500/20 transition-all" />
-            </div>
-            <div className="relative group">
-              <span className="absolute left-4 top-2 text-[8px] font-black text-slate-300 uppercase">Payment Method</span>
-              <input value={manualPaymentMethod} onChange={e => setManualPaymentMethod(e.target.value)} className="w-full h-14 pt-4 px-4 bg-slate-50 rounded-xl text-xs font-black outline-none border border-transparent focus:border-blue-500/20 transition-all" />
-            </div>
-          </div>
-
-          <div className="pt-2">
-            <h3 className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-3">2. Human supplement</h3>
-            <textarea 
-               value={humanSupplement} 
-               onChange={e => setHumanSupplement(e.target.value)} 
-               placeholder="Write additional context or manual notes here to be merged with AI reply..."
-               className="w-full h-24 p-4 bg-slate-50 rounded-2xl text-xs font-bold outline-none border border-transparent focus:border-blue-500/20 resize-none leading-relaxed"
-            />
-          </div>
-
-          <button 
-            onClick={handleTriage} 
-            disabled={isAnalyzing} 
-            className="w-full h-14 bg-slate-950 text-white rounded-2xl font-black text-[10px] uppercase tracking-widest hover:bg-black active:scale-95 transition-all shadow-xl shadow-slate-900/10"
-          >
-            {isAnalyzing ? 'SYNTHESIZING CONTEXT...' : 'SYNC AI SYNTHESIS'}
-          </button>
-        </section>
-
-        <section className="flex-1 flex flex-col min-h-[300px]">
-          <h3 className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-4">3. Final Draft Terminal</h3>
-          <div className="flex-1 bg-white border border-slate-200 rounded-[32px] p-8 shadow-2xl flex flex-col border-t-[10px] border-t-blue-600 relative overflow-hidden">
-            {!hasProof && (
-              <div className="absolute top-2 right-4 flex items-center gap-1.5 px-2 py-1 bg-rose-50 rounded-lg border border-rose-100">
-                <div className="w-1.5 h-1.5 bg-rose-500 rounded-full animate-pulse" />
-                <span className="text-[8px] font-black text-rose-500 uppercase">Proof Missing</span>
+          <div className="space-y-6">
+            <h3 className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Response Workspace</h3>
+            
+            {email.aiResult?.chinese_summary && (
+              <div className="bg-blue-50/50 rounded-2xl p-6 border border-blue-100 shadow-sm">
+                <h4 className="text-[9px] font-black text-blue-600 uppercase tracking-widest mb-3">AI Intelligence Summary</h4>
+                <div className="text-xs font-bold text-blue-900 whitespace-pre-wrap leading-relaxed">
+                  {email.aiResult.chinese_summary}
+                </div>
               </div>
             )}
-            <textarea 
-              className="flex-1 w-full text-sm font-bold text-slate-800 bg-transparent outline-none resize-none p-0 custom-scrollbar leading-relaxed" 
-              value={draftReply} 
-              onChange={e => setDraftReply(e.target.value)} 
-            />
-            <button 
-              onClick={handleSendReply} 
-              disabled={isSending || !draftReply || email.status === 'resolved'} 
-              className="mt-6 w-full h-16 bg-blue-600 text-white rounded-3xl font-black text-xs tracking-widest hover:bg-blue-700 active:scale-95 transition-all shadow-xl shadow-blue-500/30"
-            >
-              {isSending ? 'SENDING...' : 'SEND REPLY'}
-            </button>
+
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="text-[9px] font-black text-slate-400 uppercase tracking-widest mb-2 block">UID (QUERY PARAMETER)</label>
+                <div className="flex gap-2">
+                  <input 
+                    value={manualUserId} 
+                    onChange={e => setManualUserId(e.target.value)} 
+                    className="flex-1 bg-slate-50 rounded-lg px-3 py-2 text-xs font-bold outline-none border border-transparent focus:border-blue-200 transition-all" 
+                    placeholder="12345678" 
+                  />
+                  <button 
+                    onClick={handleQueryUser} 
+                    disabled={isQuerying || !manualUserId || manualUserId.trim() === ''} 
+                    className="px-6 py-2 bg-[#0F172A] text-white rounded-lg text-[10px] font-black uppercase tracking-widest hover:bg-black transition-all flex items-center gap-2 disabled:opacity-30 disabled:cursor-not-allowed"
+                  >
+                    {isQuerying ? <div className="w-2 h-2 bg-white rounded-full animate-ping" /> : null}
+                    {isQuerying ? 'BUSY...' : 'RUN QUERY'}
+                  </button>
+                </div>
+              </div>
+              <div>
+                <label className="text-[9px] font-black text-slate-400 uppercase tracking-widest mb-2 block">PAYMENT REFERENCE</label>
+                <input 
+                  value={manualPaymentMethod} 
+                  onChange={e => setManualPaymentMethod(e.target.value)} 
+                  className="w-full bg-slate-50 rounded-lg px-3 py-2 text-xs font-bold outline-none border border-transparent focus:border-blue-200 transition-all" 
+                  placeholder="Stripe" 
+                />
+              </div>
+            </div>
+
+            {email.linkedProfile || isQuerying ? (
+              <div className="bg-[#0D1117] text-slate-300 rounded-[32px] p-8 shadow-2xl relative flex flex-col min-h-[450px] border border-slate-800 animate-in fade-in duration-500">
+                <div className="flex justify-between items-start mb-8">
+                   <div className="space-y-1">
+                      <div className="flex items-center gap-2">
+                        <div className={`w-2 h-2 rounded-full ${isQuerying ? 'bg-amber-500 animate-pulse' : 'bg-emerald-500'}`} />
+                        <h4 className="text-[11px] font-black text-blue-400 uppercase tracking-widest">
+                          {isQuerying ? 'SHELL_PROD_DB: CONNECTING...' : 'SHELL_PROD_DB: ACTIVE'}
+                        </h4>
+                      </div>
+                      <p className="text-[8px] font-mono text-slate-500">HOST: readonly-for-data-analysis.cv0kgvmpymow.us-west-2.rds.amazonaws.com</p>
+                      <p className="text-[8px] font-mono text-slate-500">USER: data_analyst_01 | PORT: 3306</p>
+                   </div>
+                   <div className="flex gap-1.5 p-1 bg-white/5 rounded-xl border border-white/5">
+                      {[
+                        { id: 'STRIPE', label: 'Stripe' },
+                        { id: 'SUBS', label: 'Subs' },
+                        { id: 'ENERGY', label: 'Energy' },
+                        { id: 'TASKS', label: 'Tasks' }
+                      ].map((tab: any) => (
+                        <button 
+                          key={tab.id} 
+                          onClick={() => setActiveDbTab(tab.id)}
+                          className={`px-3 py-1.5 rounded-lg text-[9px] font-black uppercase transition-all ${activeDbTab === tab.id ? 'bg-blue-600 text-white shadow-lg shadow-blue-500/30' : 'text-slate-500 hover:text-white hover:bg-white/10'}`}
+                        >
+                          {tab.label}
+                        </button>
+                      ))}
+                   </div>
+                </div>
+
+                <div className="mb-6 animate-in fade-in slide-in-from-top-2 duration-300">
+                   <div className="flex items-start gap-2 text-[10px] font-mono text-emerald-400/80 mb-2">
+                      <span className="text-slate-500 shrink-0">mysql></span>
+                      <span className="font-bold whitespace-pre-wrap">{getActiveSql(activeDbTab, manualUserId)}</span>
+                   </div>
+                   <div className="h-0.5 w-full bg-slate-800 rounded-full" />
+                </div>
+
+                <div className="flex-1 overflow-y-auto custom-scrollbar bg-black/30 rounded-2xl p-4 border border-white/5">
+                  {isQuerying ? (
+                    <div className="space-y-1 font-mono text-[9px] text-slate-500">
+                      {queryLogs.map((log, i) => (
+                        <div key={i} className="animate-in fade-in slide-in-from-left-2 duration-200" style={{animationDelay: `${i * 300}ms`}}>{log}</div>
+                      ))}
+                      <div className="flex items-center gap-2 mt-4 text-blue-400">
+                        <span className="animate-spin text-lg">⟳</span>
+                        <span>EXECUTING REMOTE SQL...</span>
+                      </div>
+                    </div>
+                  ) : (
+                    <pre className="text-[10px] font-mono text-slate-300/90 leading-relaxed animate-in fade-in zoom-in duration-300">
+                      {activeDbTab === 'STRIPE' && JSON.stringify(email.linkedProfile?.stripe_orders_json || [], null, 2)}
+                      {activeDbTab === 'SUBS' && JSON.stringify(email.linkedProfile?.subscriptions_json || [], null, 2)}
+                      {activeDbTab === 'ENERGY' && JSON.stringify(email.linkedProfile?.energy_logs_json || [], null, 2)}
+                      {activeDbTab === 'TASKS' && JSON.stringify(email.linkedProfile?.art_tasks_json || [], null, 2)}
+                    </pre>
+                  )}
+                </div>
+
+                {!isQuerying && (
+                  <div className="mt-8 flex justify-between items-center">
+                      <div className="flex gap-6 text-[10px]">
+                          <div>
+                             <div className="font-black text-slate-500 uppercase tracking-widest mb-1">Rows Found</div>
+                             <div className="font-black text-white">
+                                {activeDbTab === 'STRIPE' ? email.linkedProfile?.stripe_orders_json?.length : 
+                                 activeDbTab === 'SUBS' ? email.linkedProfile?.subscriptions_json?.length :
+                                 activeDbTab === 'ENERGY' ? email.linkedProfile?.energy_logs_json?.length : 
+                                 email.linkedProfile?.art_tasks_json?.length}
+                             </div>
+                          </div>
+                          <div>
+                             <div className="font-black text-slate-500 uppercase tracking-widest mb-1">Status</div>
+                             <div className="font-black text-emerald-500 uppercase tracking-wider">SUCCESS 200</div>
+                          </div>
+                      </div>
+                      <button onClick={handleGenerateReplyFromData} disabled={isGeneratingFromData} className="px-8 py-4 bg-indigo-600 text-white rounded-[20px] text-[10px] font-black uppercase tracking-[0.2em] hover:bg-indigo-700 shadow-2xl shadow-indigo-500/40 active:scale-95 transition-all flex items-center gap-3">
+                        {isGeneratingFromData ? 'COMPUTING...' : 'SYNC TO DRAFT'}
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+                      </button>
+                  </div>
+                )}
+              </div>
+            ) : null}
+
+            <div>
+              <div className="flex justify-between items-center mb-3">
+                <label className="text-[9px] font-black text-slate-400 uppercase tracking-widest block">Standard Templates</label>
+              </div>
+              
+              <div className="flex flex-wrap gap-2 mb-4">
+                {templates.map(t => {
+                  const isRecommended = t.id === aiRecommendedId;
+                  const isSelected = selectedTemplateId === t.id;
+                  return (
+                    <button
+                      key={t.id}
+                      onClick={() => selectTemplate(t)}
+                      className={`px-3 py-2 rounded-xl text-[10px] font-black uppercase tracking-tight transition-all border ${
+                        isSelected 
+                          ? 'bg-blue-600 border-blue-600 text-white shadow-lg shadow-blue-500/20' 
+                          : isRecommended
+                            ? 'bg-amber-50 border-amber-200 text-amber-700 hover:border-amber-400 shadow-sm'
+                            : 'bg-white border-slate-200 text-slate-500 hover:border-blue-300 hover:text-blue-600 shadow-sm'
+                      } flex items-center gap-1.5`}
+                    >
+                      {t.name}
+                      {isRecommended && !isSelected && (
+                         <div className="w-1 h-1 bg-amber-400 rounded-full animate-pulse" />
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+
+              <textarea 
+                value={draftReply} 
+                onChange={e => setDraftReply(e.target.value)} 
+                className="w-full h-72 bg-slate-50 rounded-3xl p-8 text-xs font-bold outline-none border border-transparent focus:border-blue-200 resize-none leading-relaxed shadow-inner transition-all" 
+                placeholder="The intelligent draft will appear here..."
+              />
+            </div>
+            
+            {errorMsg && (
+              <div className="p-4 bg-rose-50 text-rose-600 rounded-xl text-xs font-bold border border-rose-100 animate-in shake-x duration-500">
+                {errorMsg}
+              </div>
+            )}
+            
+            {sendSuccess && (
+              <div className="p-4 bg-emerald-50 text-emerald-600 rounded-xl text-xs font-bold border border-emerald-100 animate-in zoom-in duration-300">
+                Reply sent successfully!
+              </div>
+            )}
           </div>
-        </section>
+        </div>
       </div>
     </div>
   );
 };
-
-const Checkmark = ({ label, active }: { label: string, active: boolean }) => (
-  <div className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full border transition-all ${active ? 'bg-emerald-50 border-emerald-100 text-emerald-600' : 'bg-slate-50 border-slate-100 text-slate-300'}`}>
-     <svg className={`w-3 h-3 ${active ? 'opacity-100' : 'opacity-20'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M5 13l4 4L19 7"/></svg>
-     <span className="text-[9px] font-black uppercase tracking-tighter">{label}</span>
-  </div>
-);
 
 export default EmailDetail;

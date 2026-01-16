@@ -1,0 +1,52 @@
+
+[
+  {
+    "id": "T1",
+    "name": "Information Recovery",
+    "category": "SUBSCRIPTION_MISSING_INFO",
+    "rulePrompt": "Use when a user asks about subscription/recharge issues but lacks full info (missing UID, payment method, or receipt).",
+    "content": "Dear Customer,\n\nThank you for contacting MyShell.\n\nTo investigate your transaction, we require the following missing details:\n\n- Your unique User ID\n- Payment platform used (e.g., Stripe/PayPal)\n- A clear screenshot of the receipt/confirmation\n\nOnce provided, our team will manually verify and update your balance.\n\nBest regards,\nMyShell Support Team"
+  },
+  {
+    "id": "T2",
+    "name": "NSFW Policy Notice",
+    "category": "NSFW_ISSUE",
+    "rulePrompt": "Use when a user complains about NSFW content being locked or bots being limited after policy changes.",
+    "content": "Dear Customer,\n\nThank you for your inquiry. Please be advised that NSFW content and associated bots are now a Pro-exclusive feature.\n\nTo unlock these capabilities, consider upgrading your account. We currently have a promotion: Use code UPGRADEPRO for 50% off yearly plans.\n\nBest regards,\nMyShell Support Team"
+  },
+  {
+    "id": "T3",
+    "name": "Technical Diagnostics",
+    "category": "ACCOUNT_USAGE_ERROR",
+    "rulePrompt": "Use for account-related technical bugs, 500 errors, or usage failures where we need the UID to check the backend.",
+    "content": "Dear Customer,\n\nWe are sorry to hear you're experiencing technical difficulties.\n\nWe have logged this issue with our engineering team. To expedite the fix, please confirm:\n- Your UID\n- Your device OS version\n\nExpect a follow-up within 72 hours.\n\nBest regards,\nMyShell Support Team"
+  },
+  {
+    "id": "T4",
+    "name": "Account Deletion Guide",
+    "category": "ACCOUNT_DELETION",
+    "rulePrompt": "Use when a user explicitly requests to delete their account or personal data.",
+    "content": "Dear Customer,\n\nYou can delete your account via My Profile > Settings > Delete Account.\n\nPlease note that this action is permanent and all data will be erased.\n\nBest regards,\nMyShell Support Team"
+  },
+  {
+    "id": "T5",
+    "name": "Energy Consumption Explained",
+    "category": "BOT_POWER_ISSUE",
+    "rulePrompt": "Use when a user complains about a bot consuming too much energy/power per task.",
+    "content": "Dear Customer,\n\nOur power system is dynamic. Consumption is calculated post-task based on complexity.\n\nWe are working on detailed usage logs to improve transparency.\n\nBest regards,\nMyShell Support Team"
+  },
+  {
+    "id": "T6",
+    "name": "Subscription Reminder",
+    "category": "POST_DELETION_BILLING",
+    "rulePrompt": "Use when a user is still being charged by PayPal/Stripe after deleting their MyShell account.",
+    "content": "Dear Customer,\n\nNote that deleting your MyShell account does not automatically cancel third-party billing cycles (Stripe/PayPal).\n\nPlease cancel your active subscription in your payment portal to prevent future charges.\n\nBest regards,\nMyShell Support Team"
+  },
+  {
+    "id": "T7",
+    "name": "AI INTELLIGENT REPLY",
+    "category": "OTHER",
+    "rulePrompt": "DEFAULT: Use for general queries or when subscription info is already complete. Generate a smart context-aware reply.",
+    "content": "[AI CONTEXT-AWARE DRAFT]"
+  }
+]
